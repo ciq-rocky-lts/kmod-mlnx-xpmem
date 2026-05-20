@@ -1,0 +1,24 @@
+# SecureBoot official signing:
+# Define signing macros if we are signing with a YubiHSM:
+%if 0%{?pe_signing_certkeyslot:1}
+%define _with_modsign 1
+%define __certkeyslot %{?pe_signing_certkeyslot:%{pe_signing_certkeyslot}}
+%define __opensslcnf %{?pe_signing_opensslcnf:%{pe_signing_opensslcnf}}
+
+export OPENSSL_CONF=%{__opensslcnf}
+
+# sign-file requires special environment variable - it is set up to mask output so we don't expose it to logs
+{ export KBUILD_SIGN_PIN=$HSMPIN; } &> /dev/null
+
+%define privkey "pkcs11:token=YubiHSM;id=%{__certkeyslot}"
+%ifarch x86_64
+%define pubkey %{SOURCE8001}
+%endif
+%ifarch aarch64
+%define pubkey %{SOURCE8002}
+%endif
+
+# Need yubihsm connector config file
+# Also - /etc/pkcs11/modules/yubihsm.modules *MUST* exist and be configured for the yubihsm_pkcs11.so file
+echo -e "connector = http://10.0.200.5:12345\ndebug" > yubihsm_pkcs11.conf
+%endif
