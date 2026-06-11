@@ -1,61 +1,28 @@
-# Kernel types to build for.  Use --without stock, --without clk6_12,
-# --without clk6_18 on the rpmbuild line to disable specific kernel types.
-# Use --without realtime to skip RT kernel variants.
+# CLK builds are selected by the clk_version macro injected by the mock config.
 %bcond_without stock
-%bcond_with clk6_12
-%bcond_with clk6_18
 %bcond_without realtime
 
-# CLK kernels only exist on RHEL 9
-%if 0%{?rhel} != 9
-%global with_clk6_12 0
-%global with_clk6_18 0
+# Stubs for building outside CIQ secureboot mock (e.g. plain rocky-9-x86_64 SRPM
+# build).  ciq-mock-secureboot-configs provides the real implementations; these
+# only activate when that package is absent.  Detection stubs produce a placeholder
+# kver (0.0.0-0); requires stubs produce no Requires lines.  Binary builds always
+# run inside CIQ mock where the real macros are present.
+%if !0%{?ciq_detect_stock_kver:1}
+%define ciq_detect_stock_kver %global kmod_stock_kver 0.0.0-0 %{nil}
 %endif
+%if !0%{?ciq_detect_clk_kver:1}
+%define ciq_detect_clk_kver %{nil}
+%endif
+%{!?ciq_kmod_stock_requires: %define ciq_kmod_stock_requires(n:k:d) %{nil}}
+%{!?ciq_clk_kmod_meta_requires: %define ciq_clk_kmod_meta_requires(n:k:d) %{nil}}
 
-# Save user's CLK intent before kernel version detection may undefine with_clk*.
-# These flags gate BuildRequires so the kernel-devel packages are always pulled in.
-%if %{with clk6_12}
-%global want_clk6_12 1
-%endif
-%if %{with clk6_18}
-%global want_clk6_18 1
-%endif
-
-# Detect kernel versions from installed kernel-devel packages.
-# Each kernel type filters /usr/src/kernels/ for its own directories.
-# Trim off any variant suffix (+rt, +64k).  If no kernel-devel found, default to epoch.
 %if %{with stock}
-%{!?kmod_stock_kver: %global kmod_stock_kver %(sh -c 'find /usr/src/kernels/* -maxdepth 0 -type d 2>/dev/null || date +"%%s"' | sort -V | grep -v '+clk' | tail -1 | awk -F '/' '{print $NF}' | sed 's/\.%{_arch}.*//')}
+%ciq_detect_stock_kver
+%else
+%ciq_detect_clk_kver
+%if "%{?kmod_clk_kver}" == ""
+%global kmod_clk_kver 0.0.0-0
 %endif
-
-%if %{with clk6_12}
-%{!?kmod_clk6_12_kver: %global kmod_clk6_12_kver %(sh -c 'find /usr/src/kernels/* -maxdepth 0 -type d 2>/dev/null || date +"%%s"' | sort -V | grep '+clk6\.12' | tail -1 | awk -F '/' '{print $NF}' | sed 's/\.%{_arch}.*//')}
-# Disable CLK 6.12 if no kernel-devel found (e.g. during SRPM build).
-# Top-level BuildRequires ensure the binary build fails if it's truly missing.
-%if %(test -n "%{kmod_clk6_12_kver}" && echo 1 || echo 0) == 0
-%undefine with_clk6_12
-%endif
-%endif
-
-%if %{with clk6_18}
-%{!?kmod_clk6_18_kver: %global kmod_clk6_18_kver %(sh -c 'find /usr/src/kernels/* -maxdepth 0 -type d 2>/dev/null || date +"%%s"' | sort -V | grep '+clk6\.18' | tail -1 | awk -F '/' '{print $NF}' | sed 's/\.%{_arch}.*//')}
-# Disable CLK 6.18 if no kernel-devel found (e.g. during SRPM build).
-# Top-level BuildRequires ensure the binary build fails if it's truly missing.
-%if %(test -n "%{kmod_clk6_18_kver}" && echo 1 || echo 0) == 0
-%undefine with_clk6_18
-%endif
-%endif
-
-# Helper macros to extract kernel base version and release number from a kernel version string.
-# Example: "5.14.0-503.5.1.el9_5" -> base "5.14.0", release "503"
-%define kver_base() %(echo "%{1}" | grep -Eo '^.*-' | tr -d '-')
-%define kver_release() %(echo "%{1}" | grep -Eo '\\-[[:digit:]]+\\.' | tr -d '.' | tr -d '-')
-
-# For module signing: CLK kernels on RHEL 9 need stock kernel's sign-file
-# (upstream 6.12.x sign-file uses OpenSSL 3 provider API; our PKCS11 config
-# uses the OpenSSL 1.x engine API which the 5.14.0 sign-file still expects)
-%if %{with clk6_12} || %{with clk6_18} || 0%{?is_clk_kernel}
-%global sign_files_kernel_clk %(sh -c 'find /usr/src/kernels/* -maxdepth 0 -type d 2>/dev/null || date +"%%s"' | sort -V | awk -F '/' '{print $NF}' | grep -E '^5\.14|^4\.18' | tail -1 | sed 's/\.%{_arch}.*//')
 %endif
 
 # Information in description for secure-boot signed builds
@@ -70,7 +37,7 @@
 Summary: Cross-partition memory
 Name: kmod-mlnx-xpmem
 Version: 2510.0.16
-Release: 8%{?dist}
+Release: 10.1%{?dist}
 License: GPLv2 and LGPLv2.1
 Url: http://www.mellanox.com/
 Source: xpmem-%{version}.tar.gz
@@ -86,6 +53,12 @@ BuildRequires:  make,gcc,gcc-c++,glibc-devel,kernel-headers,tar,hostname,autocon
 
 # Kernel-devel BuildRequires must be at the top level so the dependency
 # resolver installs them before macro expansion detects kernel versions.
+#
+# RT gating: mock's dependency resolver does not honour rpmbuild_opts, so
+# the "with realtime" bcond only gates BuildRequires installation when the
+# mock config also sets config_opts['macros']['_without_realtime'] = '1'.
+#
+# xpmem: debug variants only on non-aarch64; 64k variants only on aarch64.
 %if %{with stock}
 BuildRequires:  kernel-devel
 %ifnarch aarch64
@@ -107,52 +80,17 @@ BuildRequires:  kernel-rt-64k-devel
 %endif
 %endif
 
-%if 0%{?want_clk6_12}
-BuildRequires:  kernel-clk6.12-devel
+%if 0%{?want_clk_version:1}
+BuildRequires:  kernel-clk%{want_clk_version}-devel
 %ifnarch aarch64
-BuildRequires:  kernel-clk6.12-debug-devel
+BuildRequires:  kernel-clk%{want_clk_version}-debug-devel
 %endif
-%ifarch aarch64
 %if 0%{?rhel} > 8
-BuildRequires:  kernel-clk6.12-64k-devel
-%endif
-%endif
-%if 0%{?rhel} < 10
-# Secureboot workaround: CLK kernel sign-file uses OpenSSL 3 provider API;
-# need stock kernel-devel for its sign-file which uses the engine API
-BuildRequires:  kernel-devel < 5.15
-%endif
-%endif
-
-%if 0%{?want_clk6_18}
-BuildRequires:  kernel-clk6.18-devel
-%ifnarch aarch64
-BuildRequires:  kernel-clk6.18-debug-devel
-%endif
 %ifarch aarch64
-%if 0%{?rhel} > 8
-BuildRequires:  kernel-clk6.18-64k-devel
+BuildRequires:  kernel-clk%{want_clk_version}-64k-devel
 %endif
 %endif
-%if 0%{?rhel} < 10
-# Secureboot workaround: CLK kernel sign-file uses OpenSSL 3 provider API;
-# need stock kernel-devel for its sign-file which uses the engine API
-BuildRequires:  kernel-devel < 5.15
 %endif
-%endif
-
-%if 0%{?is_clk_kernel}
-%if 0%{?rhel} < 10
-# On CLK mock builders (is_clk_kernel=1) without an explicit --with clk6_12/18,
-# the want_clk6_* flags are never set so the BR above is skipped.
-# Pull in stock kernel-devel anyway so sign_files_kernel_clk can find its sign-file.
-BuildRequires:  kernel-devel < 5.15
-%endif
-%endif
-
-Source8000:     ciq_sbsign.macros
-Source8001:     ciq_sb_kernel_driver.der
-Source8002:     ciq_sb_kernel_driver_aarch64.der
 
 %define __spec_install_post  /usr/lib/rpm/check-buildroot \
                              /usr/lib/rpm/redhat/brp-ldconfig \
@@ -178,21 +116,40 @@ Obsoletes:      xpmem-dkms <= %{version}
 ExcludeArch:    %{ix86}
 
 # Boolean dependencies: install the right kmod subpackage for each installed kernel
-Requires:       (%{name}-base if kernel)
-Requires:       (%{name}-debug if kernel-debug)
-Requires:       (%{name}-rt if kernel-rt)
-Requires:       (%{name}-rt-debug if kernel-rt-debug)
-Requires:       (%{name}-64k if kernel-64k)
-Requires:       (%{name}-rt-64k if kernel-rt-64k)
-Requires:       (%{name}-clk6.12-base if kernel-clk6.12)
-Requires:       (%{name}-clk6.12-debug if kernel-clk6.12-debug)
-Requires:       (%{name}-clk6.12-64k if kernel-clk6.12-64k)
-Requires:       (%{name}-clk6.18-base if kernel-clk6.18)
-Requires:       (%{name}-clk6.18-debug if kernel-clk6.18-debug)
-Requires:       (%{name}-clk6.18-64k if kernel-clk6.18-64k)
+%if %{with stock}
+%ifarch aarch64
+%ciq_kmod_stock_requires -n %{name} -k %{kmod_stock_kver} -d
+%else
+%ciq_kmod_stock_requires -n %{name} -k %{kmod_stock_kver}
+%endif
+%else
+# CLK kernels use .xz compressed modules; weak-modules needs the ciq-kmod patch.
+Requires(post):   ciq-kmod
+Requires(postun): ciq-kmod
+%if 0%{?clk_version:1}
+%ifarch aarch64
+%ciq_clk_kmod_meta_requires -n %{name} -k %{kmod_clk_kver} -d
+%else
+%ciq_clk_kmod_meta_requires -n %{name} -k %{kmod_clk_kver}
+%endif
+%endif
+%endif
 
-# At least one variant subpackage must be installed
-Requires:       (%{name}-base or %{name}-debug or %{name}-rt or %{name}-rt-debug or %{name}-64k or %{name}-rt-64k or %{name}-clk6.12-base or %{name}-clk6.12-debug or %{name}-clk6.12-64k or %{name}-clk6.18-base or %{name}-clk6.18-debug or %{name}-clk6.18-64k)
+# At least one variant subpackage must be installed.
+# xpmem: debug only on non-aarch64; 64k only on aarch64.
+%if 0%{?clk_version:1}
+%ifarch aarch64
+Requires:       (%{name}-clk%{clk_version}-base or %{name}-clk%{clk_version}-64k)
+%else
+Requires:       (%{name}-clk%{clk_version}-base or %{name}-clk%{clk_version}-debug)
+%endif
+%else
+%ifarch aarch64
+Requires:       (%{name}-base or %{name}-64k)
+%else
+Requires:       (%{name}-base or %{name}-debug)
+%endif
+%endif
 
 
 %description
@@ -206,16 +163,16 @@ installed variants of the kernel.
 #   -p  variant prefix for subpackage naming (omit for stock, "clk6.18-" for CLK)
 #   -v  kernel version string
 # Positional args:
-#   %{1}  variant name (base, debug, rt, etc.)
-#   %{2}  optional flag — if set, this is the "base" variant (no variant suffix on kernel name)
+#   %%{1}  variant name (base, debug, rt, etc.)
+#   %%{2}  optional flag — if set, this is the "base" variant (no variant suffix on kernel name)
 %define global_kmod_package(k:p:v:) %{expand:\
 %package %{?-p:%{-p*}}%{1}
 Summary:        Cross-partition memory
 
 Requires:       %{name}-common
-Requires:       %{-k*}%{!?2:-%{1}} >= %{kver_base %{-v*}}-%{kver_release %{-v*}}, %{-k*}%{!?2:-%{1}} < %{kver_base %{-v*}}-%(let release=%{kver_release %{-v*}}+1; echo $release)
-Requires(post): %{_sbindir}/weak-modules
-Requires(postun): %{_sbindir}/weak-modules
+Requires:       %{-k*}%{!?2:-%{1}} >= %{kver_lo %{-v*}}, %{-k*}%{!?2:-%{1}} < %{kver_hi %{-v*}}
+Requires(posttrans):    %{_sbindir}/weak-modules
+Requires(postun):       %{_sbindir}/weak-modules
 
 Recommends:     dnf-plugin-protected-kmods >= 1.0.0
 
@@ -226,12 +183,10 @@ XPMEM is a Linux kernel module that enables a process to map the
 memory of another process into its virtual address space.
 
 This package includes the kernel module and associated tooling
-
-This was built specifically for kernel series:
-%{kver_base %{-v*}}-%{kver_release %{-v*}}
 }
 
 # Generate subpackages for stock kernel
+# xpmem: debug only on non-aarch64; 64k only on aarch64
 %if %{with stock}
 %global_kmod_package -k kernel -v %{kmod_stock_kver} base 1
 %ifnarch aarch64
@@ -253,28 +208,15 @@ This was built specifically for kernel series:
 %endif
 %endif
 
-# Generate subpackages for CLK 6.12 (no RT variants for CLK kernels)
-%if %{with clk6_12}
-%global_kmod_package -k kernel-clk6.12 -p clk6.12- -v %{kmod_clk6_12_kver} base 1
+# Generate subpackages for CLK kernel (no RT variants for CLK kernels)
+%if 0%{?clk_version:1}
+%global_kmod_package -k kernel-clk%{clk_version} -p clk%{clk_version}- -v %{kmod_clk_kver} base 1
 %ifnarch aarch64
-%global_kmod_package -k kernel-clk6.12 -p clk6.12- -v %{kmod_clk6_12_kver} debug
+%global_kmod_package -k kernel-clk%{clk_version} -p clk%{clk_version}- -v %{kmod_clk_kver} debug
 %endif
 %if 0%{?rhel} > 8
 %ifarch aarch64
-%global_kmod_package -k kernel-clk6.12 -p clk6.12- -v %{kmod_clk6_12_kver} 64k
-%endif
-%endif
-%endif
-
-# Generate subpackages for CLK 6.18 (no RT variants for CLK kernels)
-%if %{with clk6_18}
-%global_kmod_package -k kernel-clk6.18 -p clk6.18- -v %{kmod_clk6_18_kver} base 1
-%ifnarch aarch64
-%global_kmod_package -k kernel-clk6.18 -p clk6.18- -v %{kmod_clk6_18_kver} debug
-%endif
-%if 0%{?rhel} > 8
-%ifarch aarch64
-%global_kmod_package -k kernel-clk6.18 -p clk6.18- -v %{kmod_clk6_18_kver} 64k
+%global_kmod_package -k kernel-clk%{clk_version} -p clk%{clk_version}- -v %{kmod_clk_kver} 64k
 %endif
 %endif
 %endif
@@ -304,6 +246,9 @@ This package includes common utilities required by all kernel variant packages.
 
 
 %prep
+%if 0%{?clk_version:1}
+[ "%{kmod_clk_kver}" != "0.0.0-0" ] || { echo "CLK kver detection failed: no kernel-clk%{clk_version}-devel found in /usr/src/kernels/" >&2; exit 1; }
+%endif
 %autosetup -n xpmem-%{version}
 # Update source version to match RPM version
 sed -i "s/AC_INIT(\[xpmem\], \[.*\]/AC_INIT([xpmem], [%{version}]/" configure.ac
@@ -349,10 +294,9 @@ EOF
 # Shell function to build all variants for a given kernel type.
 # Args: $1=kernel version, $2=prefix, $3=build RT variants (0 or 1),
 #       $4=kernel type suffix ("" or "+clk6.18")
-# Unlike knem (which only gates 64k on arch), xpmem has inverted arch guards:
-#   BUILD_DEBUG / BUILD_RT_DEBUG = 1 on x86_64, 0 on aarch64 (no -debug on aarch64)
-#   BUILD_64K                    = 0 on x86_64, 1 on aarch64 (only on aarch64)
-# These vars are set from RPM conditionals before calling this function.
+# xpmem arch guards (set from RPM conditionals before calling this function):
+#   BUILD_DEBUG / BUILD_RT_DEBUG = 1 on x86_64, 0 on aarch64
+#   BUILD_64K                    = 1 on aarch64, 0 on x86_64
 BuildAllVariantsForKernel() {
     local kver=$1
     local prefix=$2
@@ -395,21 +339,14 @@ export BUILD_RT=1
 %if %{with stock}
 BuildAllVariantsForKernel "%{kmod_stock_kver}" "" "$BUILD_RT" ""
 %endif
-%if %{with clk6_12}
-BuildAllVariantsForKernel "%{kmod_clk6_12_kver}" "clk6.12-" "0" "+clk6.12"
-%endif
-%if %{with clk6_18}
-BuildAllVariantsForKernel "%{kmod_clk6_18_kver}" "clk6.18-" "0" "+clk6.18"
+%if 0%{?clk_version:1}
+BuildAllVariantsForKernel "%{kmod_clk_kver}" "clk%{clk_version}-" "0" "+clk%{clk_version}"
 %endif
 
 
 %install
-%if %{?_with_modsign:1}%{!?_with_modsign:0}
-%include %{SOURCE8000}
-# If the module signing keys are not defined, define them here.
-%{!?privkey: %define privkey %{_sysconfdir}/pki/SECURE-BOOT-KEY.priv}
-%{!?pubkey: %define pubkey %{_sysconfdir}/pki/SECURE-BOOT-KEY.der}
-%endif
+# privkey, pubkey, and _with_modsign are set by the CIQ secureboot macrofile.
+# Signing environment (OPENSSL_CONF, YUBIHSM_CONNECTOR) is set by the mock tpl.
 
 # Shell function to install one kernel variant.
 # Args: $1=variant, $2=kernel version, $3=prefix, $4=sign-file kernel version,
@@ -466,19 +403,7 @@ InstallVariant() {
     # Sign the modules(s)
     %if %{?_with_modsign:1}%{!?_with_modsign:0}
     for module in $(find %{buildroot}/lib/modules/${kver}.%{_arch}${kvariant} -type f -name \*.ko 2>/dev/null); do
-        for attempt in 1 2 3; do
-            errmsg=$(%{_usrsrc}/kernels/${sign_kver}.%{_arch}/scripts/sign-file \
-                sha256 %{privkey} %{pubkey} $module 2>&1) && rc=0 || rc=$?
-            [ $rc -eq 0 ] && break
-            if [ $attempt -lt 3 ] && echo "$errmsg" | grep -q "All sessions are allocated"; then
-                echo "HSM session limit hit, sleeping 30s before retry (attempt $attempt/3)..." >&2
-                sleep 30
-            else
-                echo "$errmsg" >&2
-                exit $rc
-            fi
-        done
-        sleep %{?kmod_sign_sleep}%{!?kmod_sign_sleep:4}
+        %ciq_sign_kmod -s %{_usrsrc}/kernels/${sign_kver}.%{_arch}${ktype_suffix}/scripts/sign-file
     done
     %endif
 
@@ -488,10 +413,7 @@ InstallVariant() {
 # Shell function to install all variants for a given kernel type.
 # Args: $1=kernel version, $2=prefix, $3=sign-file kernel version, $4=build RT variants (0 or 1),
 #       $5=kernel type suffix ("" or "+clk6.18")
-# Unlike knem (which only gates 64k on arch), xpmem has inverted arch guards:
-#   BUILD_DEBUG / BUILD_RT_DEBUG = 1 on x86_64, 0 on aarch64 (no -debug on aarch64)
-#   BUILD_64K                    = 0 on x86_64, 1 on aarch64 (only on aarch64)
-# These vars are set from RPM conditionals before calling this function.
+# Uses BUILD_DEBUG, BUILD_RT_DEBUG, BUILD_64K env vars set from RPM conditionals.
 InstallAllVariantsForKernel() {
     local kver=$1
     local prefix=$2
@@ -533,17 +455,10 @@ export BUILD_RT=1
 %endif
 
 %if %{with stock}
-%if 0%{?is_clk_kernel}
-InstallAllVariantsForKernel "%{kmod_stock_kver}" "" "%{sign_files_kernel_clk}" "$BUILD_RT" ""
-%else
 InstallAllVariantsForKernel "%{kmod_stock_kver}" "" "%{kmod_stock_kver}" "$BUILD_RT" ""
 %endif
-%endif
-%if %{with clk6_12}
-InstallAllVariantsForKernel "%{kmod_clk6_12_kver}" "clk6.12-" "%{sign_files_kernel_clk}" "0" "+clk6.12"
-%endif
-%if %{with clk6_18}
-InstallAllVariantsForKernel "%{kmod_clk6_18_kver}" "clk6.18-" "%{sign_files_kernel_clk}" "0" "+clk6.18"
+%if 0%{?clk_version:1}
+InstallAllVariantsForKernel "%{kmod_clk_kver}" "clk%{clk_version}-" "%{kmod_clk_kver}" "0" "+clk%{clk_version}"
 %endif
 
 
@@ -551,12 +466,11 @@ InstallAllVariantsForKernel "%{kmod_clk6_18_kver}" "clk6.18-" "%{sign_files_kern
 #   -p  variant prefix (omit for stock)
 #   -v  kernel version string
 #   -s  kernel type suffix (omit for stock, "+clk6.18" for CLK)
-# Positional: %{1}=variant, %{2}=optional base flag
+# Positional: %%{1}=variant, %%{2}=optional base flag
 %define post_scriptlet(p:v:s:) %{expand:\
 %post %{?-p:%{-p*}}%{1}
 modules=( $(find /lib/modules/%{-v*}.%{_arch}%{?-s:%{-s*}}%{!?2:+%{1}}/extra/%{name}/ | grep '\\.ko$') )
 printf '%s\\n' "${modules[@]}" | %{_sbindir}/weak-modules --add-modules
-
 mkdir -p "%{kver_state_dir}"
 touch "%{kver_state_dir}/%{-v*}.%{_arch}-%{?-p:%{-p*}}%{1}"
 }
@@ -583,28 +497,15 @@ touch "%{kver_state_dir}/%{-v*}.%{_arch}-%{?-p:%{-p*}}%{1}"
 %endif
 %endif
 
-# CLK 6.12 kernel post scriptlets
-%if %{with clk6_12}
-%post_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 base 1
+# CLK kernel post scriptlets
+%if 0%{?clk_version:1}
+%post_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} base 1
 %ifnarch aarch64
-%post_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 debug
+%post_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} debug
 %endif
 %if 0%{?rhel} > 8
 %ifarch aarch64
-%post_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 64k
-%endif
-%endif
-%endif
-
-# CLK 6.18 kernel post scriptlets
-%if %{with clk6_18}
-%post_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 base 1
-%ifnarch aarch64
-%post_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 debug
-%endif
-%if 0%{?rhel} > 8
-%ifarch aarch64
-%post_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 64k
+%post_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} 64k
 %endif
 %endif
 %endif
@@ -643,28 +544,15 @@ exit 0
 %endif
 %endif
 
-# CLK 6.12 kernel posttrans scriptlets
-%if %{with clk6_12}
-%posttrans_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 base
+# CLK kernel posttrans scriptlets
+%if 0%{?clk_version:1}
+%posttrans_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} base
 %ifnarch aarch64
-%posttrans_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 debug
+%posttrans_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} debug
 %endif
 %if 0%{?rhel} > 8
 %ifarch aarch64
-%posttrans_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 64k
-%endif
-%endif
-%endif
-
-# CLK 6.18 kernel posttrans scriptlets
-%if %{with clk6_18}
-%posttrans_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 base
-%ifnarch aarch64
-%posttrans_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 debug
-%endif
-%if 0%{?rhel} > 8
-%ifarch aarch64
-%posttrans_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 64k
+%posttrans_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} 64k
 %endif
 %endif
 %endif
@@ -703,28 +591,15 @@ rpm -ql %{name}-%{?-p:%{-p*}}%{1}-%{version}-%{release}.%{_arch} | grep '\\.ko$'
 %endif
 %endif
 
-# CLK 6.12 kernel preun scriptlets
-%if %{with clk6_12}
-%preun_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 base
+# CLK kernel preun scriptlets
+%if 0%{?clk_version:1}
+%preun_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} base
 %ifnarch aarch64
-%preun_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 debug
+%preun_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} debug
 %endif
 %if 0%{?rhel} > 8
 %ifarch aarch64
-%preun_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 64k
-%endif
-%endif
-%endif
-
-# CLK 6.18 kernel preun scriptlets
-%if %{with clk6_18}
-%preun_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 base
-%ifnarch aarch64
-%preun_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 debug
-%endif
-%if 0%{?rhel} > 8
-%ifarch aarch64
-%preun_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 64k
+%preun_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} 64k
 %endif
 %endif
 %endif
@@ -769,28 +644,15 @@ exit 0
 %endif
 %endif
 
-# CLK 6.12 kernel postun scriptlets
-%if %{with clk6_12}
-%postun_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 base
+# CLK kernel postun scriptlets
+%if 0%{?clk_version:1}
+%postun_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} base
 %ifnarch aarch64
-%postun_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 debug
+%postun_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} debug
 %endif
 %if 0%{?rhel} > 8
 %ifarch aarch64
-%postun_scriptlet -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 64k
-%endif
-%endif
-%endif
-
-# CLK 6.18 kernel postun scriptlets
-%if %{with clk6_18}
-%postun_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 base
-%ifnarch aarch64
-%postun_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 debug
-%endif
-%if 0%{?rhel} > 8
-%ifarch aarch64
-%postun_scriptlet -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 64k
+%postun_scriptlet -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} 64k
 %endif
 %endif
 %endif
@@ -812,64 +674,60 @@ exit 0
 #   -p  variant prefix (omit for stock)
 #   -v  kernel version string
 #   -s  kernel type suffix (omit for stock, "+clk6.18" for CLK)
-# Positional: %{1}=variant, %{2}=optional base flag
-%define global_files(p:v:s:) %{expand:\
+# Positional: %%{1}=variant, %%{2}=optional base flag
+%define kmod_files(p:v:s:) %{expand:\
 %files %{?-p:%{-p*}}%{1}
 %defattr(644,root,root,755)
-/lib/modules/%{-v*}.%{_arch}%{?-s:%{-s*}}%{!?2:+%{1}}/
+/lib/modules/%{-v*}.%{_arch}%{?-s:%{-s*}}%{!?2:+%{1}}/extra/%{name}
 %config %{_sysconfdir}/dnf/plugins/protected-kmods.d/%{name}-%{?-p:%{-p*}}%{1}.conf
 }
 
 # Stock kernel files
 %if %{with stock}
-%global_files -v %{kmod_stock_kver} base 1
+%kmod_files -v %{kmod_stock_kver} base 1
 %ifnarch aarch64
-%global_files -v %{kmod_stock_kver} debug
+%kmod_files -v %{kmod_stock_kver} debug
 %endif
 %if 0%{?rhel} > 8
 %if %{with realtime}
-%global_files -v %{kmod_stock_kver} rt
+%kmod_files -v %{kmod_stock_kver} rt
 %ifnarch aarch64
-%global_files -v %{kmod_stock_kver} rt-debug
+%kmod_files -v %{kmod_stock_kver} rt-debug
 %endif
 %endif
 %ifarch aarch64
-%global_files -v %{kmod_stock_kver} 64k
+%kmod_files -v %{kmod_stock_kver} 64k
 %if %{with realtime}
-%global_files -v %{kmod_stock_kver} rt-64k
+%kmod_files -v %{kmod_stock_kver} rt-64k
 %endif
 %endif
 %endif
 %endif
 
-# CLK 6.12 kernel files
-%if %{with clk6_12}
-%global_files -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 base 1
+# CLK kernel files
+%if 0%{?clk_version:1}
+%kmod_files -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} base 1
 %ifnarch aarch64
-%global_files -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 debug
+%kmod_files -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} debug
 %endif
 %if 0%{?rhel} > 8
 %ifarch aarch64
-%global_files -p clk6.12- -v %{kmod_clk6_12_kver} -s +clk6.12 64k
-%endif
-%endif
-%endif
-
-# CLK 6.18 kernel files
-%if %{with clk6_18}
-%global_files -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 base 1
-%ifnarch aarch64
-%global_files -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 debug
-%endif
-%if 0%{?rhel} > 8
-%ifarch aarch64
-%global_files -p clk6.18- -v %{kmod_clk6_18_kver} -s +clk6.18 64k
+%kmod_files -p clk%{clk_version}- -v %{kmod_clk_kver} -s +clk%{clk_version} 64k
 %endif
 %endif
 %endif
 
 
 %changelog
+* Thu Jun 11 2026 Joseph S. Tate <jtate@ciq.com> - 2510.0.16-10.1
+- Pass -d to ciq_kmod_stock_requires on aarch64; no debug variants on aarch64
+
+* Mon Jun 09 2026 Joseph S. Tate <jtate@ciq.com> - 2510.0.16-10.0
+- Migrate to %%ciq_detect_*_kver / %%ciq_kmod_*_requires / %%ciq_sign_kmod framework
+
+* Fri May 15 2026 Joseph S. Tate <jtate@ciq.com> - 2510.0.16-9
+- Bump release for CLK 6.12.87-2.1 and 6.18.28-2.1 kernel rebuilds
+
 * Mon May 11 2026 Joseph S. Tate <jtate@ciq.com> - 2510.0.16-8
 - Bump for CLK 6.12.87 and 6.18.28 kernel builds
 
